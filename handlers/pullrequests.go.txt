@@ -1,0 +1,163 @@
+package handlers
+
+import (
+    "net/http"
+    "pr-reviewer-service/database"
+    "pr-reviewer-service/models"
+    "time"
+
+    "github.com/gin-gonic/gin"
+)
+
+func CreatePullRequest(c *gin.Context) {
+    var request struct {
+        PullRequestID   string `json:"pull_request_id"`
+        PullRequestName string `json:"pull_request_name"`
+        AuthorID        string `json:"author_id"`
+    }
+    if err := c.ShouldBindJSON(&request); err != nil {
+        sendError(c, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+        return
+    }
+
+    var existingPR models.PullRequest
+    result := database.DB.Where("pull_request_id = ?", request.PullRequestID).First(&existingPR)
+    if result.RowsAffected > 0 {
+        sendError(c, http.StatusConflict, "PR_EXISTS", "PR id already exists")
+        return
+    }
+
+    var author models.User
+    result = database.DB.Where("user_id = ?", request.AuthorID).First(&author)
+    if result.RowsAffected == 0 {
+        sendError(c, http.StatusNotFound, "NOT_FOUND", "author not found")
+        return
+    }
+
+    pr := models.PullRequest{
+        PullRequestID:   request.PullRequestID,
+        PullRequestName: request.PullRequestName,
+        AuthorID:        request.AuthorID,
+        Status:          "OPEN",
+        CreatedAt:       time.Now(),
+    }
+
+    reviewers, err := assignReviewers(author.TeamName, author.UserID)
+    if err != nil {
+        sendError(c, http.StatusInternalServerError, "ASSIGNMENT_ERROR", err.Error())
+        return
+    }
+
+    if err := database.DB.Create(&pr).Error; err != nil {
+        sendError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
+        return
+    }
+
+    for _, reviewer := range reviewers {
+        database.DB.Exec("INSERT INTO pr_reviewers (pull_request_id, user_id) VALUES (?, ?)", pr.PullRequestID, reviewer.UserID)
+    }
+
+    var createdPR models.PullRequest
+    database.DB.Preload("AssignedReviewers").Where("pull_request_id = ?", pr.PullRequestID).First(&createdPR)
+
+    c.JSON(http.StatusCreated, models.PRResponse{PR: &createdPR})
+}
+
+func MergePullRequest(c *gin.Context) {
+    var request struct {
+        PullRequestID string `json:"pull_request_id"`
+    }
+    if err := c.ShouldBindJSON(&request); err != nil {
+        sendError(c, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+        return
+    }
+
+    var pr models.PullRequest
+    result := database.DB.Where("pull_request_id = ?", request.PullRequestID).First(&pr)
+    if result.RowsAffected == 0 {
+        sendError(c, http.StatusNotFound, "NOT_FOUND", "PR not found")
+        return
+    }
+
+    if pr.Status == "MERGED" {
+        c.JSON(http.StatusOK, models.PRResponse{PR: &pr})
+        return
+    }
+
+    now := time.Now()
+    pr.Status = "MERGED"
+    pr.MergedAt = &now
+    database.DB.Save(&pr)
+
+    c.JSON(http.StatusOK, models.PRResponse{PR: &pr})
+}
+
+func ReassignReviewer(c *gin.Context) {
+    var request struct {
+        PullRequestID string `json:"pull_request_id"`
+        OldUserID     string `json:"old_user_id"`
+    }
+    if err := c.ShouldBindJSON(&request); err != nil {
+        sendError(c, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+        return
+    }
+
+    var pr models.PullRequest
+    result := database.DB.Preload("AssignedReviewers").Where("pull_request_id = ?", request.PullRequestID).First(&pr)
+    if result.RowsAffected == 0 {
+        sendError(c, http.StatusNotFound, "NOT_FOUND", "PR not found")
+        return
+    }
+
+    if pr.Status == "MERGED" {
+        sendError(c, http.StatusConflict, "PR_MERGED", "cannot reassign on merged PR")
+        return
+    }
+
+    oldReviewerAssigned := false
+    for _, reviewer := range pr.AssignedReviewers {
+        if reviewer.UserID == request.OldUserID {
+            oldReviewerAssigned = true
+            break
+        }
+    }
+    if !oldReviewerAssigned {
+        sendError(c, http.StatusConflict, "NOT_ASSIGNED", "reviewer is not assigned to this PR")
+        return
+    }
+
+    var oldReviewer models.User
+    result = database.DB.Where("user_id = ?", request.OldUserID).First(&oldReviewer)
+    if result.RowsAffected == 0 {
+        sendError(c, http.StatusNotFound, "NOT_FOUND", "old reviewer not found")
+        return
+    }
+
+    var newReviewer models.User
+    subQuery := database.DB.Table("pr_reviewers").Select("user_id").Where("pull_request_id = ? AND user_id != ?", pr.PullRequestID, oldReviewer.UserID)
+    query := database.DB.Where("team_name = ? AND is_active = TRUE AND user_id != ?", oldReviewer.TeamName, pr.AuthorID).
+        Where("user_id NOT IN (?)", subQuery).
+        Order("RANDOM()").First(&newReviewer)
+
+    if query.RowsAffected == 0 {
+        sendError(c, http.StatusConflict, "NO_CANDIDATE", "no active replacement candidate in team")
+        return
+    }
+
+    database.DB.Exec("DELETE FROM pr_reviewers WHERE pull_request_id = ? AND user_id = ?", pr.PullRequestID, oldReviewer.UserID)
+    database.DB.Exec("INSERT INTO pr_reviewers (pull_request_id, user_id) VALUES (?, ?)", pr.PullRequestID, newReviewer.UserID)
+
+    database.DB.Preload("AssignedReviewers").Where("pull_request_id = ?", pr.PullRequestID).First(&pr)
+
+    c.JSON(http.StatusOK, models.ReassignResponse{
+        PR:         &pr,
+        ReplacedBy: newReviewer.UserID,
+    })
+}
+
+func assignReviewers(teamName, excludeUserID string) ([]models.User, error) {
+    var reviewers []models.User
+    err := database.DB.Where("team_name = ? AND is_active = TRUE AND user_id != ?", teamName, excludeUserID).
+        Order("RANDOM()").Limit(2).Find(&reviewers).Error
+    return reviewers, err
+}

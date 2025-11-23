@@ -1,0 +1,66 @@
+package handlers
+
+import (
+    "net/http"
+    "pr-reviewer-service/database"
+    "pr-reviewer-service/models"
+
+    "github.com/gin-gonic/gin"
+)
+
+func SetUserActive(c *gin.Context) {
+    var request struct {
+        UserID   string `json:"user_id"`
+        IsActive bool   `json:"is_active"`
+    }
+    if err := c.ShouldBindJSON(&request); err != nil {
+        sendError(c, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+        return
+    }
+
+    var user models.User
+    result := database.DB.Where("user_id = ?", request.UserID).First(&user)
+    if result.RowsAffected == 0 {
+        sendError(c, http.StatusNotFound, "NOT_FOUND", "user not found")
+        return
+    }
+
+    user.IsActive = request.IsActive
+    database.DB.Save(&user)
+
+    c.JSON(http.StatusOK, models.UserResponse{User: user})
+}
+
+func GetUserReviews(c *gin.Context) {
+    userID := c.Query("user_id")
+    if userID == "" {
+        sendError(c, http.StatusBadRequest, "INVALID_REQUEST", "user_id is required")
+        return
+    }
+
+    var user models.User
+    result := database.DB.Where("user_id = ?", userID).First(&user)
+    if result.RowsAffected == 0 {
+        sendError(c, http.StatusNotFound, "NOT_FOUND", "user not found")
+        return
+    }
+
+    var prReviews []models.PullRequest
+    database.DB.Joins("JOIN pr_reviewers ON pr_reviewers.pull_request_id = pull_requests.pull_request_id").
+        Where("pr_reviewers.user_id = ?", userID).Find(&prReviews)
+
+    var prShorts []models.PullRequestShort
+    for _, pr := range prReviews {
+        prShorts = append(prShorts, models.PullRequestShort{
+            PullRequestID:   pr.PullRequestID,
+            PullRequestName: pr.PullRequestName,
+            AuthorID:        pr.AuthorID,
+            Status:          pr.Status,
+        })
+    }
+
+    c.JSON(http.StatusOK, models.UserReviewsResponse{
+        UserID:       userID,
+        PullRequests: prShorts,
+    })
+}
