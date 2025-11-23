@@ -1,0 +1,42 @@
+package models
+
+import (
+    "time"
+    
+    "gorm.io/gorm"
+)
+
+type Team struct {
+    TeamName string `gorm:"primaryKey" json:"team_name"`
+    Members  []User `gorm:"foreignKey:TeamName" json:"members"`
+}
+
+type User struct {
+    UserID   string `gorm:"primaryKey" json:"user_id"`
+    Username string `json:"username"`
+    TeamName string `json:"team_name"`
+    IsActive bool   `json:"is_active"`
+}
+
+type PullRequest struct {
+    PullRequestID   string    `gorm:"primaryKey" json:"pull_request_id"`
+    PullRequestName string    `json:"pull_request_name"`
+    AuthorID        string    `json:"author_id"`
+    Author          User      `gorm:"foreignKey:AuthorID" json:"-"`
+    Status          string    `json:"status"` // "OPEN" or "MERGED"
+    CreatedAt       time.Time `json:"createdAt"`
+    MergedAt        *time.Time `json:"mergedAt,omitempty"`
+    AssignedReviewers []User   `gorm:"many2many:pr_reviewers;" json:"assigned_reviewers"`
+}
+
+type PRReviewer struct {
+    PullRequestID string `gorm:"primaryKey"`
+    UserID        string `gorm:"primaryKey"`
+}
+
+type PullRequestShort struct {
+    PullRequestID   string `json:"pull_request_id"`
+    PullRequestName string `json:"pull_request_name"`
+    AuthorID        string `json:"author_id"`
+    Status          string `json:"status"`
+}
