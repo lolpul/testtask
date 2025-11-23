@@ -1,0 +1,19 @@
+package handlers
+
+import (
+    "net/http"
+    "pr-reviewer-service/models"
+
+    "github.com/gin-gonic/gin"
+)
+
+func sendError(c *gin.Context, code int, errorCode string, message string) {
+    c.JSON(code, models.ErrorResponse()){
+        Error: struct {
+            Code    string `json:"code"`
+            Message string `json:"message"}
+        }{
+            Code:    errorCode,
+            Message: message,
+        },
+    }

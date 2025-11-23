@@ -1,0 +1,58 @@
+package handlers
+
+import (
+    "net/http"
+    "pr-reviewer-service/database"
+    "pr-reviewer-service/models"
+
+    "github.com/gin-gonic/gin"
+)
+
+func CreateTeam(c *gin.Context) {
+    var team models.Team
+    if err := c.ShouldBindJSON(&team); err != nil {
+        sendError(c, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+        return
+    }
+
+    var existingTeam models.Team
+    result := database.DB.Where("team_name = ?", team.TeamName).First(&existingTeam)
+    if result.RowsAffected > 0 {
+        sendError(c, http.StatusBadRequest, "TEAM_EXISTS", "team_name already exists")
+        return
+    }
+
+    if err := database.DB.Create(&team).Error; err != nil {
+        sendError(c, http.StatusInternalServerError, "DB_ERROR", err.Error())
+        return
+    }
+
+    for i := range team.Members {
+        team.Members[i].TeamName = team.TeamName
+        var user models.User
+        if err := database.DB.Where("user_id = ?", team.Members[i].UserID).First(&user).Error; err != nil {
+            database.DB.Create(&team.Members[i])
+        } else {
+            database.DB.Model(&user).Updates(&team.Members[i])
+        }
+    }
+
+    c.JSON(http.StatusCreated, models.TeamResponse{Team: team})
+}
+
+func GetTeam(c *gin.Context) {
+    teamName := c.Query("team_name")
+    if teamName == "" {
+        sendError(c, http.StatusBadRequest, "INVALID_REQUEST", "team_name is required")
+        return
+    }
+
+    var team models.Team
+    result := database.DB.Preload("Members").Where("team_name = ?", teamName).First(&team)
+    if result.RowsAffected == 0 {
+        sendError(c, http.StatusNotFound, "NOT_FOUND", "team not found")
+        return
+    }
+
+    c.JSON(http.StatusOK, team)
+}
